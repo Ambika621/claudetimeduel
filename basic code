@@ -1,0 +1,729 @@
+// ========================================
+// FOLDER STRUCTURE:
+// Assets/
+//   Scripts/
+//     Player/
+//       PlayerController3D.cs
+//       CameraController.cs
+//       CombatController.cs
+//       HealthSystem.cs
+//     TimeLoop/
+//       TimeLoopManager.cs
+//       GhostRecorder.cs
+//       GhostPlaybackController.cs
+//     UI/
+//       GameUIManager.cs
+// ========================================
+
+// ==========================================
+// PlayerController3D.cs
+// ==========================================
+using UnityEngine;
+
+public class PlayerController3D : MonoBehaviour
+{
+    [Header("Movement")]
+    public float moveSpeed = 8f;
+    public float sprintMultiplier = 1.5f;
+    public float acceleration = 10f;
+    public float airControl = 0.5f;
+    
+    [Header("Jump & Dash")]
+    public float jumpForce = 12f;
+    public float dashSpeed = 20f;
+    public float dashDuration = 0.2f;
+    public float dashCooldown = 1f;
+    
+    [Header("Ground Check")]
+    public Transform groundCheck;
+    public float groundDistance = 0.3f;
+    public LayerMask groundMask;
+    
+    private Rigidbody rb;
+    private Vector3 velocity;
+    private Vector3 moveInput;
+    private bool isGrounded;
+    private bool isDashing;
+    private float dashTimer;
+    private float dashCooldownTimer;
+    
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+        rb.freezeRotation = true;
+    }
+    
+    void Update()
+    {
+        // Ground check
+        isGrounded = Physics.CheckSphere(groundCheck.position, groundDistance, groundMask);
+        
+        // Input
+        float horizontal = Input.GetAxisRaw("Horizontal");
+        float vertical = Input.GetAxisRaw("Vertical");
+        moveInput = new Vector3(horizontal, 0, vertical).normalized;
+        
+        // Jump
+        if (Input.GetButtonDown("Jump") && isGrounded)
+        {
+            rb.velocity = new Vector3(rb.velocity.x, jumpForce, rb.velocity.z);
+        }
+        
+        // Dash
+        dashCooldownTimer -= Time.deltaTime;
+        if (Input.GetKeyDown(KeyCode.LeftShift) && dashCooldownTimer <= 0 && !isDashing)
+        {
+            StartDash();
+        }
+        
+        if (isDashing)
+        {
+            dashTimer -= Time.deltaTime;
+            if (dashTimer <= 0)
+            {
+                isDashing = false;
+            }
+        }
+    }
+    
+    void FixedUpdate()
+    {
+        if (isDashing)
+        {
+            rb.velocity = transform.forward * dashSpeed;
+            return;
+        }
+        
+        // Movement with acceleration
+        float currentSpeed = Input.GetKey(KeyCode.LeftControl) ? moveSpeed * sprintMultiplier : moveSpeed;
+        float controlFactor = isGrounded ? 1f : airControl;
+        
+        Vector3 targetVelocity = moveInput * currentSpeed;
+        Vector3 velocityChange = (targetVelocity - new Vector3(rb.velocity.x, 0, rb.velocity.z)) * controlFactor;
+        
+        rb.AddForce(velocityChange * acceleration, ForceMode.Acceleration);
+        
+        // Rotation towards movement
+        if (moveInput.magnitude > 0.1f)
+        {
+            Quaternion targetRotation = Quaternion.LookRotation(moveInput);
+            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.fixedDeltaTime * 15f);
+        }
+    }
+    
+    void StartDash()
+    {
+        isDashing = true;
+        dashTimer = dashDuration;
+        dashCooldownTimer = dashCooldown;
+    }
+    
+    public Vector3 GetMoveInput() => moveInput;
+    public bool IsDashing() => isDashing;
+}
+
+// ==========================================
+// CameraController.cs
+// ==========================================
+using UnityEngine;
+
+public class CameraController : MonoBehaviour
+{
+    [Header("Target")]
+    public Transform target;
+    
+    [Header("Camera Settings")]
+    public float distance = 8f;
+    public float height = 3f;
+    public float sensitivity = 3f;
+    public float smoothSpeed = 10f;
+    
+    [Header("Limits")]
+    public float minVerticalAngle = -30f;
+    public float maxVerticalAngle = 60f;
+    
+    private float currentX = 0f;
+    private float currentY = 20f;
+    
+    void Start()
+    {
+        Cursor.lockState = CursorLockMode.Locked;
+    }
+    
+    void LateUpdate()
+    {
+        if (!target) return;
+        
+        // Mouse input
+        currentX += Input.GetAxis("Mouse X") * sensitivity;
+        currentY -= Input.GetAxis("Mouse Y") * sensitivity;
+        currentY = Mathf.Clamp(currentY, minVerticalAngle, maxVerticalAngle);
+        
+        // Calculate position
+        Quaternion rotation = Quaternion.Euler(currentY, currentX, 0);
+        Vector3 offset = rotation * new Vector3(0, height, -distance);
+        Vector3 targetPosition = target.position + offset;
+        
+        // Smooth follow
+        transform.position = Vector3.Lerp(transform.position, targetPosition, smoothSpeed * Time.deltaTime);
+        transform.LookAt(target.position + Vector3.up * height * 0.5f);
+    }
+}
+
+// ==========================================
+// CombatController.cs
+// ==========================================
+using UnityEngine;
+
+public class CombatController : MonoBehaviour
+{
+    [Header("Melee Combat")]
+    public float meleeRange = 2f;
+    public float meleeDamage = 20f;
+    public float meleeKnockback = 5f;
+    public float attackCooldown = 0.5f;
+    
+    [Header("Ranged Combat")]
+    public GameObject projectilePrefab;
+    public Transform firePoint;
+    public float projectileSpeed = 25f;
+    public float projectileDamage = 15f;
+    
+    [Header("VFX")]
+    public TrailRenderer attackTrail;
+    public ParticleSystem hitEffect;
+    
+    private float attackTimer;
+    private GhostRecorder recorder;
+    
+    void Start()
+    {
+        recorder = GetComponent<GhostRecorder>();
+    }
+    
+    void Update()
+    {
+        attackTimer -= Time.deltaTime;
+        
+        // Melee attack
+        if (Input.GetMouseButtonDown(0) && attackTimer <= 0)
+        {
+            PerformMeleeAttack();
+        }
+        
+        // Ranged attack
+        if (Input.GetMouseButtonDown(1) && attackTimer <= 0)
+        {
+            FireProjectile();
+        }
+    }
+    
+    void PerformMeleeAttack()
+    {
+        attackTimer = attackCooldown;
+        
+        // Record action
+        if (recorder) recorder.RecordAction("melee");
+        
+        // Trail effect
+        if (attackTrail) attackTrail.emitting = true;
+        Invoke("StopTrail", 0.2f);
+        
+        // Detect hits
+        Collider[] hits = Physics.OverlapSphere(transform.position + transform.forward * meleeRange * 0.5f, meleeRange);
+        
+        foreach (Collider hit in hits)
+        {
+            if (hit.gameObject == gameObject) continue;
+            
+            HealthSystem health = hit.GetComponent<HealthSystem>();
+            if (health)
+            {
+                health.TakeDamage(meleeDamage);
+                
+                // Knockback
+                Rigidbody rb = hit.GetComponent<Rigidbody>();
+                if (rb)
+                {
+                    Vector3 direction = (hit.transform.position - transform.position).normalized;
+                    rb.AddForce(direction * meleeKnockback, ForceMode.Impulse);
+                }
+                
+                // VFX
+                if (hitEffect) Instantiate(hitEffect, hit.transform.position, Quaternion.identity);
+            }
+        }
+    }
+    
+    void FireProjectile()
+    {
+        attackTimer = attackCooldown;
+        
+        // Record action
+        if (recorder) recorder.RecordAction("ranged");
+        
+        if (projectilePrefab && firePoint)
+        {
+            GameObject projectile = Instantiate(projectilePrefab, firePoint.position, firePoint.rotation);
+            Rigidbody rb = projectile.GetComponent<Rigidbody>();
+            if (rb)
+            {
+                rb.velocity = firePoint.forward * projectileSpeed;
+            }
+            
+            Projectile proj = projectile.GetComponent<Projectile>();
+            if (proj)
+            {
+                proj.damage = projectileDamage;
+                proj.owner = gameObject;
+            }
+            
+            Destroy(projectile, 5f);
+        }
+    }
+    
+    void StopTrail()
+    {
+        if (attackTrail) attackTrail.emitting = false;
+    }
+}
+
+// ==========================================
+// Projectile.cs (Helper)
+// ==========================================
+using UnityEngine;
+
+public class Projectile : MonoBehaviour
+{
+    public float damage = 15f;
+    public GameObject owner;
+    public GameObject hitEffectPrefab;
+    
+    void OnCollisionEnter(Collision collision)
+    {
+        if (collision.gameObject == owner) return;
+        
+        HealthSystem health = collision.gameObject.GetComponent<HealthSystem>();
+        if (health)
+        {
+            health.TakeDamage(damage);
+        }
+        
+        if (hitEffectPrefab)
+        {
+            Instantiate(hitEffectPrefab, transform.position, Quaternion.identity);
+        }
+        
+        Destroy(gameObject);
+    }
+}
+
+// ==========================================
+// HealthSystem.cs
+// ==========================================
+using UnityEngine;
+using UnityEngine.Events;
+
+public class HealthSystem : MonoBehaviour
+{
+    [Header("Health")]
+    public float maxHealth = 100f;
+    public float currentHealth;
+    
+    [Header("Events")]
+    public UnityEvent<float> onHealthChanged;
+    public UnityEvent onDeath;
+    
+    void Start()
+    {
+        currentHealth = maxHealth;
+    }
+    
+    public void TakeDamage(float damage)
+    {
+        currentHealth -= damage;
+        currentHealth = Mathf.Max(currentHealth, 0);
+        
+        onHealthChanged?.Invoke(currentHealth / maxHealth);
+        
+        if (currentHealth <= 0)
+        {
+            Die();
+        }
+    }
+    
+    public void Heal(float amount)
+    {
+        currentHealth += amount;
+        currentHealth = Mathf.Min(currentHealth, maxHealth);
+        onHealthChanged?.Invoke(currentHealth / maxHealth);
+    }
+    
+    void Die()
+    {
+        onDeath?.Invoke();
+        // Handle death (respawn, game over, etc.)
+    }
+    
+    public void ResetHealth()
+    {
+        currentHealth = maxHealth;
+        onHealthChanged?.Invoke(1f);
+    }
+}
+
+// ==========================================
+// TimeLoopManager.cs
+// ==========================================
+using UnityEngine;
+using System.Collections.Generic;
+using UnityEngine.Events;
+
+public class TimeLoopManager : MonoBehaviour
+{
+    [Header("Loop Settings")]
+    public float loopDuration = 10f;
+    public GameObject ghostPrefab;
+    
+    [Header("Events")]
+    public UnityEvent<int> onLoopStart;
+    public UnityEvent<float> onTimeUpdate;
+    public UnityEvent onRewind;
+    
+    private float currentTime;
+    private int loopCount = 0;
+    private List<GameObject> activeGhosts = new List<GameObject>();
+    private List<GhostRecorder> playerRecorders = new List<GhostRecorder>();
+    
+    void Start()
+    {
+        // Find all players with recorders
+        playerRecorders.AddRange(FindObjectsOfType<GhostRecorder>());
+        StartLoop();
+    }
+    
+    void Update()
+    {
+        currentTime += Time.deltaTime;
+        onTimeUpdate?.Invoke(currentTime / loopDuration);
+        
+        if (currentTime >= loopDuration)
+        {
+            RewindTime();
+        }
+    }
+    
+    void StartLoop()
+    {
+        currentTime = 0;
+        loopCount++;
+        onLoopStart?.Invoke(loopCount);
+        
+        // Start recording for all players
+        foreach (var recorder in playerRecorders)
+        {
+            recorder.StartRecording();
+        }
+    }
+    
+    void RewindTime()
+    {
+        onRewind?.Invoke();
+        
+        // Stop recording and spawn ghosts
+        foreach (var recorder in playerRecorders)
+        {
+            recorder.StopRecording();
+            SpawnGhost(recorder);
+        }
+        
+        // Clear projectiles
+        GameObject[] projectiles = GameObject.FindGameObjectsWithTag("Projectile");
+        foreach (var proj in projectiles)
+        {
+            Destroy(proj);
+        }
+        
+        // Start new loop
+        Invoke("StartLoop", 0.5f); // Brief delay for rewind effect
+    }
+    
+    void SpawnGhost(GhostRecorder recorder)
+    {
+        if (!ghostPrefab || recorder.recordedFrames.Count == 0) return;
+        
+        GameObject ghost = Instantiate(ghostPrefab, recorder.transform.position, recorder.transform.rotation);
+        GhostPlaybackController playback = ghost.GetComponent<GhostPlaybackController>();
+        
+        if (playback)
+        {
+            playback.SetRecording(new List<GhostRecorder.FrameData>(recorder.recordedFrames));
+            activeGhosts.Add(ghost);
+        }
+    }
+    
+    public int GetLoopCount() => loopCount;
+    public float GetRemainingTime() => loopDuration - currentTime;
+}
+
+// ==========================================
+// GhostRecorder.cs
+// ==========================================
+using UnityEngine;
+using System.Collections.Generic;
+
+public class GhostRecorder : MonoBehaviour
+{
+    [System.Serializable]
+    public class FrameData
+    {
+        public Vector3 position;
+        public Quaternion rotation;
+        public Vector3 velocity;
+        public string action; // "melee", "ranged", "dash", etc.
+        public float timestamp;
+    }
+    
+    public List<FrameData> recordedFrames = new List<FrameData>();
+    private bool isRecording = false;
+    private Rigidbody rb;
+    private float recordTime;
+    
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+    }
+    
+    void FixedUpdate()
+    {
+        if (isRecording)
+        {
+            RecordFrame();
+        }
+    }
+    
+    public void StartRecording()
+    {
+        isRecording = true;
+        recordedFrames.Clear();
+        recordTime = 0;
+    }
+    
+    public void StopRecording()
+    {
+        isRecording = false;
+    }
+    
+    void RecordFrame()
+    {
+        FrameData frame = new FrameData
+        {
+            position = transform.position,
+            rotation = transform.rotation,
+            velocity = rb ? rb.velocity : Vector3.zero,
+            timestamp = recordTime
+        };
+        
+        recordedFrames.Add(frame);
+        recordTime += Time.fixedDeltaTime;
+    }
+    
+    public void RecordAction(string actionType)
+    {
+        if (isRecording && recordedFrames.Count > 0)
+        {
+            recordedFrames[recordedFrames.Count - 1].action = actionType;
+        }
+    }
+}
+
+// ==========================================
+// GhostPlaybackController.cs
+// ==========================================
+using UnityEngine;
+using System.Collections.Generic;
+
+public class GhostPlaybackController : MonoBehaviour
+{
+    [Header("Playback")]
+    public float playbackSpeed = 1f;
+    
+    [Header("Visual")]
+    public Material ghostMaterial;
+    public TrailRenderer echoTrail;
+    public float transparency = 0.5f;
+    
+    private List<GhostRecorder.FrameData> recording;
+    private int currentFrame = 0;
+    private float playbackTime = 0;
+    private bool isPlaying = false;
+    
+    private CombatController combat;
+    private Rigidbody rb;
+    
+    void Start()
+    {
+        combat = GetComponent<CombatController>();
+        rb = GetComponent<Rigidbody>();
+        
+        // Apply ghost visual
+        ApplyGhostMaterial();
+        
+        // Enable echo trail
+        if (echoTrail)
+        {
+            echoTrail.emitting = true;
+        }
+    }
+    
+    void Update()
+    {
+        if (!isPlaying || recording == null || currentFrame >= recording.Count) return;
+        
+        playbackTime += Time.deltaTime * playbackSpeed;
+        
+        // Find current frame
+        while (currentFrame < recording.Count && recording[currentFrame].timestamp <= playbackTime)
+        {
+            PlayFrame(recording[currentFrame]);
+            currentFrame++;
+        }
+        
+        // Destroy when done
+        if (currentFrame >= recording.Count)
+        {
+            Destroy(gameObject, 2f);
+        }
+    }
+    
+    public void SetRecording(List<GhostRecorder.FrameData> frames)
+    {
+        recording = frames;
+        isPlaying = true;
+        playbackTime = 0;
+        currentFrame = 0;
+    }
+    
+    void PlayFrame(GhostRecorder.FrameData frame)
+    {
+        // Movement
+        transform.position = frame.position;
+        transform.rotation = frame.rotation;
+        
+        if (rb)
+        {
+            rb.velocity = frame.velocity;
+        }
+        
+        // Actions
+        if (!string.IsNullOrEmpty(frame.action) && combat)
+        {
+            // Trigger same action
+            if (frame.action == "melee")
+            {
+                // Replay melee
+            }
+            else if (frame.action == "ranged")
+            {
+                // Replay ranged
+            }
+        }
+    }
+    
+    void ApplyGhostMaterial()
+    {
+        Renderer[] renderers = GetComponentsInChildren<Renderer>();
+        foreach (var renderer in renderers)
+        {
+            if (ghostMaterial)
+            {
+                renderer.material = ghostMaterial;
+            }
+            
+            // Set transparency
+            Color color = renderer.material.color;
+            color.a = transparency;
+            renderer.material.color = color;
+        }
+    }
+}
+
+// ==========================================
+// GameUIManager.cs
+// ==========================================
+using UnityEngine;
+using TMPro;
+using UnityEngine.UI;
+
+public class GameUIManager : MonoBehaviour
+{
+    [Header("UI Elements")]
+    public TextMeshProUGUI loopCountText;
+    public TextMeshProUGUI timerText;
+    public Image timerFillBar;
+    public Slider healthBar;
+    
+    [Header("Effects")]
+    public GameObject rewindEffectPanel;
+    
+    private TimeLoopManager loopManager;
+    
+    void Start()
+    {
+        loopManager = FindObjectOfType<TimeLoopManager>();
+        
+        if (loopManager)
+        {
+            loopManager.onLoopStart.AddListener(UpdateLoopCount);
+            loopManager.onTimeUpdate.AddListener(UpdateTimer);
+            loopManager.onRewind.AddListener(ShowRewindEffect);
+        }
+    }
+    
+    void UpdateLoopCount(int count)
+    {
+        if (loopCountText)
+        {
+            loopCountText.text = $"LOOP {count}";
+        }
+    }
+    
+    void UpdateTimer(float normalizedTime)
+    {
+        if (timerFillBar)
+        {
+            timerFillBar.fillAmount = 1f - normalizedTime;
+        }
+        
+        if (timerText && loopManager)
+        {
+            float remaining = loopManager.GetRemainingTime();
+            timerText.text = $"{remaining:F1}s";
+        }
+    }
+    
+    void ShowRewindEffect()
+    {
+        if (rewindEffectPanel)
+        {
+            rewindEffectPanel.SetActive(true);
+            Invoke("HideRewindEffect", 0.5f);
+        }
+    }
+    
+    void HideRewindEffect()
+    {
+        if (rewindEffectPanel)
+        {
+            rewindEffectPanel.SetActive(false);
+        }
+    }
+    
+    public void UpdateHealth(float normalizedHealth)
+    {
+        if (healthBar)
+        {
+            healthBar.value = normalizedHealth;
+        }
+    }
+}
